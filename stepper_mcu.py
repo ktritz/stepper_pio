@@ -6,14 +6,14 @@ from adafruit_pioasm import Program
 
 _asm_str = """
 reload:
-    {0}
+    {0}        ; direction bit if used
     out y, {1} ; delay
     out x, {2} ; steps
     mov isr, y 
 step_loop:
     set pins 0b1 [10]
     set pins 0b0
-    {3}
+    {3}        ; jmp if limit switch enabled
     mov y isr
 delay_loop:
     jmp y-- delay_loop
@@ -126,9 +126,12 @@ class Stepper:
         # set the MSB direction bit if used
         dir_bit = int(self.DIR_BIT) * self.direction << 31
         # build the dir|delay|step buffer for DMA writing
+
+        # additional asm step delay per loop
+        dd = self.PIO_DELAY + int(self.jmp_pin is not None)
         return array.array(
             "L",
-            [dir_bit | d << STEP_BIT_LIMIT | c for d, c in zip(u_delays, u_counts)],
+            [dir_bit | (d - dd) << STEP_BIT_LIMIT | c for d, c in zip(u_delays, u_counts)],
         )
 
     def _delay(self, i, steps, step_scale):
