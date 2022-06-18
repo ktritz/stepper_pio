@@ -125,13 +125,17 @@ class Stepper:
 
         # set the MSB direction bit if used
         dir_bit = int(self.DIR_BIT) * self.direction << 31
-        # build the dir|delay|step buffer for DMA writing
 
         # additional asm step delay per loop
         dd = self.PIO_DELAY + int(self.jmp_pin is not None)
+        
+        # build the dir|delay|step buffer for DMA writing
         return array.array(
             "L",
-            [dir_bit | (d - dd) << STEP_BIT_LIMIT | c for d, c in zip(u_delays, u_counts)],
+            [
+                dir_bit | (d - dd) << STEP_BIT_LIMIT | c
+                for d, c in zip(u_delays, u_counts)
+            ],
         )
 
     def _delay(self, i, steps, step_scale):
