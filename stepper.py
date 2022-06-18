@@ -22,10 +22,10 @@ TABLE_SCALE = 2 * PI / 2 ** 16
 
 class Stepper:
     PIO_FREQ = 1e6
+    DIR_BIT = False
     DELAY_BIT_LIMIT = 16
-    STEP_BIT_LIMIT = 32 - DELAY_BIT_LIMIT
 
-    def __init__(self, max_velocity=1000, acceleration=1.0):
+    def __init__(self, max_velocity=4000, acceleration=1.0):
         self.max_velocity = max_velocity  # velocity in Hz (1 / delay)
         self.acceleration = acceleration  # time to max_velocity in sec.
         self.micro_steps = 8
@@ -66,20 +66,21 @@ class Stepper:
         velocity = 1 / max_delay / kt * 2
         return velocity
 
-    def _delay(self, i, steps):
+    def _delay(self, i, steps, step_scale):
         # will return the interpolated time (0..2*PI) that corresponds to a given distance sqrt(0 .. PI*PI)
         # according to inverse lookup table
         sqt = self._table
+
+        if i == 0:
+            return (sqt[1] - sqt[0]) * PI * sqrt(1 / steps) / SQAT
+
         sqppos = PI * sqrt(i / steps)
 
         # approximate sqrt((i+1)/steps) - sqrt(i/steps) to estimate delay at step i
-        if i == 0:
-            dp = PI * sqrt(1 / steps)
-        else:
-            dp = PI * (sqrt(1 / 4 / steps / i) - sqrt(1 / 64 / steps / i) / i)
-
+        dp = sqrt(step_scale / i) - sqrt(step_scale / 16 / i) / i
+        dp *= PI
         if sqppos >= PI:
-            return (sqt[-1] - sqrt[-2]) * dp / SQAT
+            return (sqt[-1] - sqt[-2]) * dp / SQAT
         n = int(sqppos / SQAT)
         return (sqt[n + 1] - sqt[n]) * dp / SQAT
 
@@ -90,21 +91,32 @@ class Stepper:
         # generate list of (delays in us, # of pulses) for cos-based S-curve
         steps = self._accel_steps(velocity=velocity)
         self._repeat = ceil(steps / 2000)
-        kt = 0.1 * self.PIO_FREQ * self.acceleration / 0.63
+        kt = 0.1 * self.PIO_FREQ * self.acceleration / 0.63 * TABLE_SCALE
+        step_scale = 1 / 4 / steps  # precalc for delay loop
         delays = [
-            min(int(self._delay(i, steps) * kt * TABLE_SCALE), delay_limit)
+            min(int(self._delay(i, steps, step_scale) * kt), delay_limit)
             for i in range(0, self._repeat)
         ]
         delays += [
-            min(int(self._delay(i, steps) * kt * TABLE_SCALE), delay_limit)
+            min(int(self._delay(i, steps, step_scale) * kt), delay_limit)
             for i in range(self._repeat, steps, self._repeat)
         ]
         return list(zip(*self._unique(delays)))
 
+    def bit_convert(self, delay_list):
+        STEP_BIT_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
+        num = len(delay_list)
+        delay_arr = array.array("L", [0] * num)
+        for i, (delay, steps) in enumerate(delay_list):
+            # pioasm program adds 1 step to each delay entry
+            delay_arr[i] = delay << STEP_BIT_LIMIT | (steps - 1)
+        return delay_arr
+
     def gen_delays(self, steps):
+        STEP_BIT_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
         velocity = self.max_velocity
         steps = int(steps) * self.micro_steps
-        step_limit = 2 ** self.STEP_BIT_LIMIT - 1
+        step_limit = 2 ** STEP_BIT_LIMIT - 1
         acc_steps = self._accel_steps()
         half_steps = steps // 2
         if half_steps < acc_steps:
