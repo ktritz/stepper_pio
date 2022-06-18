@@ -11,9 +11,10 @@ reload:
     out x, {2} ; steps
     mov isr, y 
 step_loop:
-    set pins 0b1 [10]
-    set pins 0b0
-    {3}        ; jmp if limit switch enabled
+    set pins {3} [10]
+    set pins {4}
+    {5}        ; jmp if limit switch enabled
+continue:
     mov y isr
 delay_loop:
     jmp y-- delay_loop
@@ -53,6 +54,9 @@ class Stepper:
         self._repeat = 1  # repeated delays for coarser acceleration
         self.direction = 0  # forward or backward direction
         self.jmp_pin = None  # used for stepper limit switch
+        self.jmp_active = "LOW"
+        self.step_active = "HIGH"
+        self._jmp_delay = 0
         self._setup_sm()
         self._setup_delays()
 
@@ -68,21 +72,37 @@ class Stepper:
             _dir_asm = ""
             dir_pin = None
 
+        # setup pin bits for step pin active high/low
+        bits = ("0b1", "0b0")
+        if self.step_active == "HIGH":
+            step_pos, step_neg = bits
+
+        else:
+            step_neg, step_pos = bits
+
         if self.jmp_pin:  # add a jmp command to stall at limit
-            _jmp_asm = "jmp pin stall"
+            if self.jmp_active == "HIGH":
+                _jmp_asm = "jmp pin stall"
+            if self.jmp_active == "LOW":
+                _jmp_asm = "jmp pin continue\n\tjmp stall"
+            self._jmp_delay = 1
         else:
             _jmp_asm = ""
+            self._jmp_delay = 0
 
         STEP_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
 
         # fill in the stepper_asm variables
-        _asm = _asm_str.format(_dir_asm, self.DELAY_BIT_LIMIT, STEP_LIMIT, _jmp_asm)
+        _asm = _asm_str.format(
+            _dir_asm, self.DELAY_BIT_LIMIT, STEP_LIMIT, step_pos, step_neg, _jmp_asm
+        )
         _stepper_asm = Program(_asm)
         self._sm = StateMachine(
             _stepper_asm.assembled,
             auto_pull=True,
             pull_threshold=32,
             first_set_pin=board.D0,
+            initial_set_pin_state=int(step_neg),
             first_out_pin=dir_pin,
             jmp_pin=self.jmp_pin,
             exclusive_pin_use=False,
@@ -127,8 +147,8 @@ class Stepper:
         dir_bit = int(self.DIR_BIT) * self.direction << 31
 
         # additional asm step delay per loop
-        dd = self.PIO_DELAY + int(self.jmp_pin is not None)
-        
+        dd = self.PIO_DELAY + self._jmp_delay
+
         # build the dir|delay|step buffer for DMA writing
         return array.array(
             "L",
