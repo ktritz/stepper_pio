@@ -184,6 +184,9 @@ class Stepper:
         # speeds calc time and reduces buffer size
         self._repeat = ceil(steps / 2000)
 
+        # scale factor to hit the correct delay
+        # for max_velocity at the end of acceleration
+        # subject to statemachine frequency resolution
         kt = (
             0.1
             * self.PIO_FREQ
@@ -217,11 +220,11 @@ class Stepper:
         steps = int(steps) * self.micro_steps
         step_limit = 2 ** STEP_BIT_LIMIT - 1
 
-        # of steps during accleration phase
+        # number of steps during accleration phase
         acc_steps = self._accel_steps()
         half_steps = steps // 2
 
-        # lower velocity if steps won't complete acceleration
+        # lower max_velocity if steps won't complete acceleration
         if half_steps < acc_steps:
             velocity = self._calc_velocity(half_steps)
             acc_steps = self._accel_steps(velocity=velocity)
@@ -242,7 +245,7 @@ class Stepper:
             self._stored_freq = self.PIO_FREQ
 
         # necessary for step-accurate count
-        # not exactly sure how the math works
+        # not exactly sure why the math works
         if acc_steps % self._repeat:
             acc_steps += self._repeat - (acc_steps % self._repeat)
 
@@ -256,11 +259,13 @@ class Stepper:
         c_delay = acc_delays[-1] >> STEP_BIT_LIMIT
         c_delay -= dir_bit << self.DELAY_BIT_LIMIT
         c_steps = acc_delays[-1] & (2 ** STEP_BIT_LIMIT - 1)
+
+        # have to add extra step because extra asm
+        # step is subtracted twice (2 * c_steps)
         c_steps = 2 * c_steps + cruise_steps + 1
         cruise_arr = array.array("L")
 
-        # use STEP_BIT sized chunks to break up
-        # cruise steps
+        # use STEP_BIT sized chunks to break up cruise steps
         while c_steps > step_limit:
             cruise_arr.append(
                 dir_bit << 31 | c_delay << STEP_BIT_LIMIT | step_limit - 1
