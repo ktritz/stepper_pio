@@ -84,7 +84,7 @@ class Stepper:
             if self.jmp_active == "HIGH":
                 _jmp_asm = "jmp pin stall"
             if self.jmp_active == "LOW":
-                _jmp_asm = "jmp pin continue\n\tjmp stall"
+                _jmp_asm = "jmp pin continue\n    jmp stall"
             self._jmp_delay = 1
         else:
             _jmp_asm = ""
