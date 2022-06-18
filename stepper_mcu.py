@@ -57,6 +57,10 @@ class Stepper:
         self._setup_delays()
 
     def _setup_sm(self):
+        try:
+            self._sm.deinit()
+        except:
+            pass
         if self.DIR_BIT:  # asm dir control
             _dir_asm = "out pins 1"
             dir_pin = board.D1
@@ -90,7 +94,7 @@ class Stepper:
     def go(self, steps):  # run the sm, output the steps
         self._setup_sm()
         self._sm.background_write(self.gen_delays(steps))
-        self._smf.clear_txstall()
+        self._sm.clear_txstall()
 
     def stopped(self):  # check to see if buffer is done
         return self._sm.txstall
