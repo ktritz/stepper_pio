@@ -1,4 +1,5 @@
 from math import sqrt, ceil
+import time
 import array
 import board
 from rp2pio import StateMachine
@@ -9,13 +10,18 @@ reload:
     {0}        ; direction bit if used
     out y, {1} ; delay
     out x, {2} ; steps
-    mov isr, y 
+    mov isr, y
+    jmp skip 
 step_loop:
+    nop [3]
+skip:
     set pins {3} [10]
     set pins {4}
     {5}        ; jmp if limit switch enabled
 continue:
     mov y isr
+    push noblock
+    mov isr y
 delay_loop:
     jmp y-- delay_loop
     jmp x-- step_loop
@@ -38,13 +44,14 @@ AT = PI2 / MAX
 SQAT = PI / MAX
 
 TABLE_SCALE = 2 * PI / 2 ** 16
+ACC_CONST = 0.624
 
 
 class Stepper:
-    PIO_FREQ = 1e6
+    PIO_FREQ = 4e6
     DIR_BIT = False  # set direction in asm?
     DELAY_BIT_LIMIT = 16
-    PIO_DELAY = 14  # additional asm clock cycles per step
+    PIO_DELAY = 20  # additional asm clock cycles per step
 
     def __init__(self, max_velocity=2000, acceleration=0.5):
         self.max_velocity = max_velocity  # velocity in Hz (1 / delay)
@@ -111,10 +118,59 @@ class Stepper:
             **_stepper_asm.pio_kwargs,
         )
 
-    def go(self, steps):  # run the sm, output the steps
-        self._setup_sm()
+    @property
+    def velocity(self):
+        if self.stopped():
+            return 0
+        self._sm.clear_rxfifo()
+        _timeout = time.monotonic()
+        while not self._sm.in_waiting:
+            if (time.monotonic() - _timeout) > 0.1:
+                return 0
+        delay_bits = array.array("L", [0])
+        self._sm.readinto(delay_bits)
+        STEP_BIT_LIMIT = 32 - int(self.DIR_BIT) - self.DELAY_BIT_LIMIT
+        delay = delay_bits[0] + self.PIO_DELAY
+        return self.PIO_FREQ / self.micro_steps / delay
+
+    def go(self, steps, new=True):  # run the sm, output the steps
+        if new:  # assume we have new parameters
+            self._setup_sm()
         self._sm.background_write(self.gen_delays(steps))
         self._sm.clear_txstall()
+
+    def stop(self):  # gracefully decelerate
+        dec_delays = array.array("L", list(self._accel_delays()[:-1])[::-1])
+        self._sm.background_write(dec_delays)
+        self._sm.clear_txstall()
+
+    def rotate(self, velocity):  # accelerate up to contiuous rotation
+        # need more math to change velocities while rotating
+        acc_delays = self._accel_delays(velocity=velocity)
+        full_speed = array.array("L", [acc_delays[-1]])
+        self._sm.background_write(once=acc_delays, loop=full_speed)
+        self._sm.clear_txstall()
+
+    def change_velocity(self, v_start, v_end):
+        STEP_BIT_LIMIT = 32 - int(self.DIR_BIT) - self.DELAY_BIT_LIMIT
+        sign = 1 - 2 * int(v_end < v_start)
+        mag = abs(v_end - v_start)
+        acc_delays = self._accel_delays(velocity=mag)
+        v_to_d = self.PIO_FREQ / self.micro_steps
+        d_start = int(v_to_d / v_start)
+        d_end = int(v_to_d / v_end)
+        d_mag = d_start - d_end
+        d_mask = 2 ** self.DELAY_BIT_LIMIT - 1
+        d_mask <<= STEP_BIT_LIMIT
+        neg_mask = 0xFFFFFFFF - d_mask
+        for delay_bits in acc_delays:
+            d = delay_bits & d_mask
+            d = (d >> STEP_BIT_LIMIT) + self.PIO_DELAY
+            d = d * d_start / (d + sign * d_mag)
+            d -= self.PIO_DELAY
+            d <<= STEP_BIT_LIMIT
+            delay_bits = (delay_bits * neg_mask) | d
+        return acc_delays
 
     def stopped(self):  # check to see if buffer is done
         return self._sm.txstall
@@ -186,15 +242,15 @@ class Stepper:
         # number of (micro) steps to reach velocity in acceleration time
         if velocity is None:
             velocity = self.max_velocity
-        kt = 0.1 * self.acceleration / 0.63 * self.micro_steps
+        kt = 0.1 * self.acceleration / ACC_CONST * self.micro_steps
         max_delay = 1 / velocity / kt * 2
-        steps = (self._table[-1] - self._table[-2]) / max_delay * 1000 * TABLE_SCALE
+        steps = (self._table[-1] - self._table[-2]) / max_delay * MAX * TABLE_SCALE
         return int(steps)
 
     def _calc_velocity(self, steps):
         # reduce max_velocity if steps < _accel_steps(max_velocity)
-        kt = 0.1 * self.acceleration / 0.63 * self.micro_steps
-        max_delay = (self._table[-1] - self._table[-2]) / steps * 1000 * TABLE_SCALE
+        kt = 0.1 * self.acceleration / ACC_CONST * self.micro_steps
+        max_delay = (self._table[-1] - self._table[-2]) / steps * MAX * TABLE_SCALE
         velocity = 1 / max_delay / kt * 2
         return velocity
 
@@ -214,15 +270,7 @@ class Stepper:
         # scale factor to hit the correct delay
         # for max_velocity at the end of acceleration
         # subject to statemachine frequency resolution
-        kt = (
-            0.1
-            * self.PIO_FREQ
-            * self.acceleration
-            / 0.624
-            * steps
-            / (steps - 1)
-            * TABLE_SCALE
-        )
+        kt = 0.1 * self.PIO_FREQ * self.acceleration / ACC_CONST * TABLE_SCALE
         step_scale = 1 / 4 / steps  # precalc for delay loop
 
         # get fine-grained delays for first few acceleration steps
