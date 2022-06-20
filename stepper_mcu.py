@@ -4,6 +4,8 @@ import array
 import board
 from rp2pio import StateMachine
 from adafruit_pioasm import Program
+import digitalio
+
 
 _asm_str = """
 reload:
@@ -27,6 +29,7 @@ delay_loop:
     jmp x-- step_loop
     jmp reload
 stall:
+    out null 32
     jmp stall
  """
 
@@ -51,7 +54,7 @@ class Stepper:
     PIO_FREQ = 4e6
     DIR_BIT = False  # set direction in asm?
     DELAY_BIT_LIMIT = 16
-    PIO_DELAY = 20  # additional asm clock cycles per step
+    PIO_DELAY = 21  # additional asm clock cycles per step
 
     def __init__(self, max_velocity=2000, acceleration=0.5):
         self.max_velocity = max_velocity  # velocity in Hz (1 / delay)
@@ -60,10 +63,12 @@ class Stepper:
         self._table = table  # cos s-curve lookup table
         self._repeat = 1  # repeated delays for coarser acceleration
         self.direction = 0  # forward or backward direction
+
         self.jmp_pin = None  # used for stepper limit switch
         self.jmp_active = "LOW"
         self.step_active = "HIGH"
         self._jmp_delay = 0
+
         self._setup_sm()
         self._setup_delays()
 
@@ -90,12 +95,15 @@ class Stepper:
         if self.jmp_pin:  # add a jmp command to stall at limit
             if self.jmp_active == "HIGH":
                 _jmp_asm = "jmp pin stall"
+                _jmp_pull = digitalio.Pull.DOWN
             if self.jmp_active == "LOW":
                 _jmp_asm = "jmp pin continue\n    jmp stall"
+                _jmp_pull = digitalio.Pull.UP
             self._jmp_delay = 1
         else:
             _jmp_asm = ""
             self._jmp_delay = 0
+            _jmp_pull = None
 
         STEP_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
 
@@ -112,6 +120,7 @@ class Stepper:
             initial_set_pin_state=int(step_neg),
             first_out_pin=dir_pin,
             jmp_pin=self.jmp_pin,
+            jmp_pin_pull=_jmp_pull,
             exclusive_pin_use=False,
             out_shift_right=False,
             frequency=int(self.PIO_FREQ),
@@ -129,47 +138,52 @@ class Stepper:
                 return 0
         delay_bits = array.array("L", [0])
         self._sm.readinto(delay_bits)
-        STEP_BIT_LIMIT = 32 - int(self.DIR_BIT) - self.DELAY_BIT_LIMIT
-        delay = delay_bits[0] + self.PIO_DELAY
+        delay = delay_bits[0] + self.PIO_DELAY + self._jmp_delay
         return self.PIO_FREQ / self.micro_steps / delay
 
-    def go(self, steps, new=True):  # run the sm, output the steps
+    def go(self, steps, new=False):  # run the sm, output the steps
         if new:  # assume we have new parameters
             self._setup_sm()
-        self._sm.background_write(self.gen_delays(steps))
+        self._sm.background_write(self.gen_delays(steps, new=new))
         self._sm.clear_txstall()
 
     def stop(self):  # gracefully decelerate
-        dec_delays = array.array("L", list(self._accel_delays()[:-1])[::-1])
+        v = self.velocity
+        dec_delays = array.array("L", list(self._accel_delays(velocity=v)[:-1])[::-1])
         self._sm.background_write(dec_delays)
         self._sm.clear_txstall()
 
     def rotate(self, velocity):  # accelerate up to contiuous rotation
         # need more math to change velocities while rotating
-        acc_delays = self._accel_delays(velocity=velocity)
+        self.max_velocity = velocity
+        # acc_delays = self._accel_delays(velocity=velocity)
+        acc_delays = self._change_velocity(self.velocity, velocity)
         full_speed = array.array("L", [acc_delays[-1]])
         self._sm.background_write(once=acc_delays, loop=full_speed)
         self._sm.clear_txstall()
 
-    def change_velocity(self, v_start, v_end):
+    def _change_velocity(self, v_start, v_end):
         STEP_BIT_LIMIT = 32 - int(self.DIR_BIT) - self.DELAY_BIT_LIMIT
         sign = 1 - 2 * int(v_end < v_start)
         mag = abs(v_end - v_start)
         acc_delays = self._accel_delays(velocity=mag)
+        if v_start == 0:
+            return acc_delays
         v_to_d = self.PIO_FREQ / self.micro_steps
         d_start = int(v_to_d / v_start)
-        d_end = int(v_to_d / v_end)
-        d_mag = d_start - d_end
         d_mask = 2 ** self.DELAY_BIT_LIMIT - 1
         d_mask <<= STEP_BIT_LIMIT
         neg_mask = 0xFFFFFFFF - d_mask
-        for delay_bits in acc_delays:
+        for i, delay_bits in enumerate(acc_delays):
             d = delay_bits & d_mask
             d = (d >> STEP_BIT_LIMIT) + self.PIO_DELAY
-            d = d * d_start / (d + sign * d_mag)
+            d = int(d * d_start / (d + sign * d_start))
             d -= self.PIO_DELAY
             d <<= STEP_BIT_LIMIT
-            delay_bits = (delay_bits * neg_mask) | d
+            acc_delays[i] = (delay_bits & neg_mask) | d
+        acc_delays[-1] = (acc_delays[-1] & neg_mask) | (
+            (int(v_to_d / v_end) - self.PIO_DELAY) << STEP_BIT_LIMIT
+        )
         return acc_delays
 
     def stopped(self):  # check to see if buffer is done
@@ -181,10 +195,14 @@ class Stepper:
         self._stored_delays = []
         self._stored_freq = self.PIO_FREQ
 
-    def _unique(self, delays):
+    def _unique(self, delays, velocity=None):
         STEP_BIT_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
         # collect unique delay values
         # and count how many are in delay list
+        if velocity is not None:
+            min_delay = int(self.PIO_FREQ / velocity / self.micro_steps)
+            for i, d in enumerate(delays):
+                delays[i] = max(d, min_delay)
         u_delays = sorted(set(delays))[::-1]
 
         # start at -1 because asm adds a step to each delay item
@@ -204,7 +222,6 @@ class Stepper:
 
         # additional asm step delay per loop
         dd = self.PIO_DELAY + self._jmp_delay
-
         # build the dir|delay|step buffer for DMA writing
         return array.array(
             "L",
@@ -283,9 +300,9 @@ class Stepper:
             min(int(self._delay(i, steps, step_scale) * kt), delay_limit)
             for i in range(self._repeat, steps, self._repeat)
         ]
-        return self._unique(delays)
+        return self._unique(delays, velocity=velocity)
 
-    def gen_delays(self, steps):
+    def gen_delays(self, steps, new=False):
         # generate delay|step buffer
         # including acceleration + cruise + deceleration
         STEP_BIT_LIMIT = 32 - self.DELAY_BIT_LIMIT - int(self.DIR_BIT)
@@ -310,6 +327,7 @@ class Stepper:
             (velocity == self._stored_velocity)
             & (self.acceleration == self._stored_accel)
             & (self.PIO_FREQ == self._stored_freq)
+            & (not new)
         ):
             acc_delays = self._stored_delays
         else:
