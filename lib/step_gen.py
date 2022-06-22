@@ -78,6 +78,7 @@ class Delay:
         # speed up or slow down
         sign = 1 - 2 * int(v_end < v_start)
         mag = abs(v_end - v_start)
+
         # smooth curve, but accel time != self.acceleration
         acc_delays = self._accel_delays(velocity=mag)
 
