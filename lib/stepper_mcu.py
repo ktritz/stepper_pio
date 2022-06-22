@@ -1,6 +1,5 @@
 import time
 import array
-import board
 from rp2pio import StateMachine
 from adafruit_pioasm import Program
 import digitalio
@@ -73,18 +72,18 @@ class Stepper:
                 self.dir_pin = dir_pin
         else:
             self.dir_pin = None
-        self.dir_active = "HIGH"
+        self.dir_active = "LOW"
 
         if enable_pin:
             self.enable_pin = digitalio.DigitalInOut(dir_pin)
             self.enable_pin.switch_to_output()
         else:
             self.enable_pin = None
-        self.dir_active = "HIGH"
+        self.enable_active = "HIGH"
 
         self.jmp_pin = None  # used for stepper limit switch
         self.jmp_active = "LOW"
-        self.step_active = "HIGH"
+        self.step_active = "LOW"
         self._jmp_delay = 0
 
         if count_pin:
@@ -243,4 +242,13 @@ class Stepper:
 
     def stopped(self):  # check to see if buffer is done
         return self._sm.txstall
+
+    def reset(self):
+        self._sm.stop()
+        self._setup_sm()
+        if self.counter:
+            self.counter.reset()
+        if self.encoder:
+            self.encoder.position = 0
+        self._steps = 0
 
