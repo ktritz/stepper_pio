@@ -1,4 +1,4 @@
-# approximation of sum(1/i) 1 < i < n
+# approximation of sum(1/i)  1 < i < n
 from math import log, exp
 
 gamma = 0.577215664901532860606512
