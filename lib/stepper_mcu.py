@@ -5,6 +5,7 @@ from rp2pio import StateMachine
 from adafruit_pioasm import Program
 import digitalio
 import countio
+import rotaryio
 
 _asm_str = """
 reload:
@@ -37,6 +38,9 @@ class Stepper:
     DIR_BIT = False  # set direction in asm?
     DELAY_BIT_LIMIT = 16
     PIO_DELAY = 21  # additional asm clock cycles per step
+    STEPS_PER_REV = 200
+    MM_PER_REV = 5
+    ENC_TICKS_PER_MM = 500
 
     def __init__(
         self,
@@ -44,6 +48,7 @@ class Stepper:
         max_velocity=2000,
         acceleration=0.5,
         delays="linear",
+        encoder_pins=None,
         count_pin=None,
         dir_pin=None,
         enable_pin=None,
@@ -91,6 +96,11 @@ class Stepper:
             self.counter.reset()
         else:
             self.counter = None
+
+        if encoder_pins:
+            self.encoder = rotaryio.IncrementalEncoder(*encoder_pins)
+        else:
+            self.encoder = None
 
         self._steps = 0
         self._setup_sm()
@@ -159,6 +169,18 @@ class Stepper:
             self.dir_pin.value = direction ^ (self.dir_active == "LOW")
 
     @property
+    def position(self):
+        if self.encoder:
+            return self.encoder.position / self.ENC_TICKS_PER_MM
+        else:
+            return self.steps / self.STEPS_PER_REV * self.MM_PER_REV
+
+    @position.setter
+    def position(self, value):
+        delta_mm = value - self.position
+        self.steps = delta_mm / self.MM_PER_REV * self.STEPS_PER_REV
+
+    @property
     def velocity(self):
         if self.stopped():
             return 0
@@ -201,13 +223,15 @@ class Stepper:
 
     @steps.setter
     def steps(self, value):
+        if self.velocity != 0:  # not while stepper is moving
+            return
         _ = self.steps  # make sure counter is flushed
         self._set_dir(int(value < 0))
         self._sm.background_write(self.delays.gen_delays(abs(value)))
         self._sm.clear_txstall()
         if self.counter is None:
             sign = 1 - 2 * self.direction
-            self._steps += sign * value
+            self._steps += sign * abs(value) * self.micro_steps
 
     def stop(self):  # gracefully decelerate
         v = abs(self.velocity)
