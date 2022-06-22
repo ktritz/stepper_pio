@@ -2,12 +2,16 @@ import array
 from math import sqrt, ceil
 from step_gen import Delay
 
-
-with open("lib/cos_table.py") as file:
+try:
+    file = open("lib/cos_table.py")
+except FileNotFoundError:
+    file = open("cos_table.py")
+finally:
     num = int(file.readline().strip())
     TABLE = array.array("H", [0] * num)
     for i in range(num):
         TABLE[i] = int(file.readline().strip())
+    file.close()
 
 PI = 3.1415926535
 PI2 = PI * PI
