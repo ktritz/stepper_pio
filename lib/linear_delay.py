@@ -7,6 +7,7 @@ class Linear(Delay):
     def _accel_delays(self, velocity=None):
         if velocity is None:
             velocity = self.stepper.max_velocity
+        velocity = max(velocity, 10)
         frequency = self.stepper._sm.frequency
         micro_steps = self.stepper.micro_steps
         acceleration = self.stepper.acceleration
@@ -14,7 +15,7 @@ class Linear(Delay):
         delay_limit = 2 ** self.delay_bits - 1
 
         min_delay = int(frequency / velocity / micro_steps)
-        num_steps = int(velocity * micro_steps * acceleration / 100)
+        num_steps = max(int(velocity * micro_steps * acceleration / 100), 1)
         delays = [
             min(int(min_delay * num_steps / (i + 1)), delay_limit)
             for i in range(num_steps)

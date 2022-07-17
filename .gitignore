@@ -1,6 +1,6 @@
-stepper_pio.py
 __pycache__/
 __pycache__/cos_calc.cpython-39.pyc
 __pycache__/cos_table.cpython-39.pyc
 __pycache__/stepper.cpython-39.pyc
 sum_recip.py
+lib/code.py
