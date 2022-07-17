@@ -34,3 +34,8 @@ class Stepper(StepperPIO):
             self._setup_sm()
         super()._set_dir(direction)
 
+    def reset(self):
+        super().reset()
+        if self.encoder:
+            self.encoder.position = 0
+        return True

@@ -274,8 +274,6 @@ class Stepper:
         self._setup_sm()
         if self.counter:
             self.counter.reset()
-        if self.encoder:
-            self.encoder.position = 0
         self._steps = 0
         return True
 
